@@ -10,15 +10,16 @@
         "rdbms"
     ],
     "homepage": "https://github.com/malthe/ts-postgres",
-    "main": "dist/src/index.js",
-    "types": "dist/src/index.d.ts",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
     "author": "Malthe Borch <mborch@gmail.com>",
     "dependencies": {
         "ts-typed-events": "^1.1.1"
     },
     "files": [
         "/dist",
-        "/src"
+        "/src",
+        "/tsconfig.json"
     ],
     "repository": {
         "type": "git",

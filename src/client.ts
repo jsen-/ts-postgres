@@ -1,5 +1,7 @@
 import { constants } from 'os';
-import { Socket } from 'net';
+import { Socket, connect as connect } from 'net';
+import { TlsOptions, connect as tls_connect } from 'tls';
+
 import { Event as TypedEvent, events } from 'ts-typed-events';
 
 import * as defaults from './defaults';
@@ -73,7 +75,8 @@ export interface Configuration {
     types?: Map<DataType, ValueTypeReader>,
     extraFloatDigits?: number,
     keepAlive?: boolean,
-    preparedStatementPrefix?: string
+    preparedStatementPrefix?: string,
+    ssl?: false | TlsOptions
 }
 
 export interface Notification {
@@ -162,8 +165,8 @@ export class Client {
     private error = false;
 
     private readonly encoding = 'utf-8';
-    private readonly stream = new Socket();
-    private readonly writer: Writer;
+    private stream!: Socket;
+    private writer!: Writer;
 
     private buffer: Buffer | null = null;
     private expect = 5;
@@ -187,17 +190,8 @@ export class Client {
     public secretKey: number | null = null;
     public transactionStatus: TransactionStatus | null = null;
 
-    constructor(public readonly config: Configuration = {}) {
-        const keepAlive =
-            (typeof config.keepAlive === 'undefined') ?
-                config.keepAlive : true;
-
-        this.writer = new Writer(
-            this.stream,
-            this.encoding
-        );
-
-        this.stream.on('connect', () => {
+    private attach_connection(keepAlive: boolean | undefined) {
+        const onConnect = () => {
             if (keepAlive) {
                 this.stream.setKeepAlive(true)
             };
@@ -207,19 +201,9 @@ export class Client {
                 this.config.database || defaults.database || '',
                 this.config.extraFloatDigits || 0
             );
-        });
-
-        this.stream.on('close', () => {
-            this.ready = false;
-            this.connected = false;
-            this.mustDrain = false;
-        });
-
-        this.stream.on('drain', () => {
-            this.mustDrain = false;
-            this.flush();
-        });
-
+        };
+        this.stream.on('connect', onConnect);
+        this.stream.on('secureConnect', onConnect);
         this.stream.on('data', (buffer: Buffer) => {
             const length = buffer.length;
             const remaining = this.remaining;
@@ -278,14 +262,31 @@ export class Client {
             if (this.ending && error.errno === constants.errno.ECONNRESET) {
                 return
             }
-            this.events.end.emit({});
+            this.events.end.emit(error);
         });
 
         this.stream.on('finish', () => {
             this.closed = true;
             this.events.end.emit({});
         });
+
+        this.stream.on('close', () => {
+            this.ready = false;
+            this.connected = false;
+            this.mustDrain = false;
+        });
+
+        this.stream.on('drain', () => {
+            this.mustDrain = false;
+            this.flush();
+        });
+        this.writer = new Writer(
+            this.stream,
+            this.encoding
+        );
     }
+
+    constructor(public readonly config: Configuration = {}) { }
 
     connect() {
         if (this.connecting) {
@@ -303,9 +304,64 @@ export class Client {
         const host = this.config.host || defaults.host;
 
         if (host.indexOf('/') === 0) {
-            this.stream.connect(host + '/.s.PGSQL.' + port);
+            this.stream = connect(host + '/.s.PGSQL.' + port);
         } else {
-            this.stream.connect(port, host);
+            this.stream = connect(port, host);
+        }
+        const config = this.config;
+        const keepAlive =
+        (typeof config.keepAlive === 'undefined') ?
+            config.keepAlive : true;
+
+        const ssl = config.ssl;
+        if (!ssl) {
+            this.attach_connection(keepAlive);
+        } else {
+            this.stream.on('connect', () => {
+                this.stream.write(Buffer.from("0000000804d2162f", "hex"));
+                if (keepAlive) {
+                    this.stream.setKeepAlive(true);
+                };
+                this.closed = false;
+            });
+            this.stream.on('data', (buffer: Buffer) => {
+                this.stream.removeAllListeners("connect");
+                this.stream.removeAllListeners("data");
+                this.stream.removeAllListeners("error");
+                this.stream.removeAllListeners("finish");
+                this.stream.removeAllListeners("close");
+                this.stream.removeAllListeners("drain");
+                if (buffer.toString() === 'S') {
+                    (this.stream as any) = tls_connect({
+                        socket: this.stream, ...ssl
+                    });
+                    this.attach_connection(keepAlive);
+                }
+            });
+            this.stream.on('error', (error: SystemError) => {
+                // Don't raise ECONNRESET errors - they can & should be
+                // ignored during disconnect
+                if (this.ending
+                    && error.errno === constants.errno.ECONNRESET) {
+                    return;
+                }
+                this.events.end.emit({});
+            });
+            this.stream.on('finish', () => {
+                this.closed = true;
+                this.events.end.emit({});
+            });
+
+            this.stream.on('close', () => {
+                this.ready = false;
+                this.connected = false;
+                this.mustDrain = false;
+            });
+
+            this.stream.on('drain', () => {
+                this.mustDrain = false;
+                this.flush();
+            });
         }
 
         return p;
